@@ -12,37 +12,27 @@ App nativo para Linux (Rust, GTK 4 e libadwaita): leia um PDF com a tradução a
 
 ## Instalar
 
-Dependências no Ubuntu 24.04 ou mais novo (em outras distribuições, os pacotes equivalentes de GTK 4.12+, libadwaita 1.5+ e Poppler):
-
-```sh
-sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev libpoppler-glib-dev tesseract-ocr tesseract-ocr-por tesseract-ocr-eng
-```
-
-O Rust vem de [rustup.rs](https://rustup.rs) (1.88 ou mais novo). Depois:
+Um comando instala tudo: as bibliotecas do sistema, o Rust (se faltar), compila o app e cria o atalho no menu.
 
 ```sh
 ./scripts/install.sh
 ```
 
-O script compila em modo release e instala para o seu usuário: o binário em `~/.local/bin/paragrafo`, o atalho no menu de aplicativos e o ícone. O Parágrafo passa a aparecer no "Abrir com" de arquivos PDF.
-
-A tradução e o assistente usam o [Ollama](https://ollama.com/download). Baixe os modelos uma única vez:
+Para instalar também o Ollama e baixar os modelos de conversa e de busca:
 
 ```sh
-ollama pull llama3.2:3b
+./scripts/install.sh --ollama
 ```
 
-```sh
-ollama pull bge-m3
-```
+Só a instalação dos pacotes do sistema pede `sudo`; o app vai para a sua pasta pessoal (`~/.local/bin/paragrafo`, atalho e ícone em `~/.local/share`). Depois disso o Parágrafo aparece no menu de aplicativos e no "Abrir com" de arquivos PDF.
 
-Opcional, para traduções melhores (modelo feito para traduzir; é usado sozinho quando está instalado):
+Funciona em distribuições com `apt`, `dnf`, `pacman` ou `zypper` que tragam GTK 4.12+ e libadwaita 1.5+ (Ubuntu 24.04, Fedora 40, Debian 13 ou mais novos). Testado no Ubuntu 24.04; os nomes de pacote das outras distribuições não foram testados.
+
+A tradução e o assistente usam o [Ollama](https://ollama.com/download). Sem ele, abrir, ler e exportar o PDF funcionam normalmente; o app inicia o `ollama serve` quando precisa e oferece o download se algum modelo faltar. Opcional, para traduções melhores (modelo feito para traduzir; é usado sozinho quando está instalado):
 
 ```sh
 ollama pull translategemma:4b
 ```
-
-O app inicia o `ollama serve` quando precisa e oferece o download se algum modelo faltar. Sem o Ollama, abrir, ler e exportar o PDF funcionam normalmente.
 
 ## O que o app faz
 
