@@ -1,0 +1,18 @@
+[package]
+name = "paragrafo"
+description = "Leia um PDF com a tradução ao lado do original e faça perguntas ao documento. Tudo local."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+paragrafo-core = { path = "../core" }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+poppler = { package = "poppler-rs", version = "0.24", features = ["v0_82"] }
+poppler-sys = { package = "poppler-sys-rs", version = "0.24" }
+cairo = { package = "cairo-rs", version = "0.20", features = ["pdf", "png"] }
+pango = "0.20"
+pangocairo = "0.20"
+async-channel = "2"

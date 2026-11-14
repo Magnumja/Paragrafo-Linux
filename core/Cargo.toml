@@ -1,0 +1,18 @@
+[package]
+name = "paragrafo-core"
+description = "Lógica do Parágrafo sem interface: parágrafos, biblioteca, busca híbrida e cliente Ollama."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+unicode-normalization = "0.1"
+# Sem TLS de propósito: o único servidor permitido é o Ollama em 127.0.0.1.
+ureq = { version = "2", default-features = false, features = ["json"] }
+whatlang = "0.16"
+whichlang = "0.1"

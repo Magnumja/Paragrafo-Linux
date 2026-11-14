@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Parágrafo
+GenericName=Leitor e tradutor de PDF
+Comment=Leia um PDF com a tradução ao lado do original e faça perguntas ao documento, tudo no seu computador
+Exec=paragrafo %f
+Icon=io.github.magnumja.Paragrafo
+Terminal=false
+Categories=Office;Viewer;Education;
+MimeType=application/pdf;
+Keywords=pdf;tradução;traduzir;leitor;llama;ollama;
+StartupNotify=true
+StartupWMClass=io.github.magnumja.Paragrafo

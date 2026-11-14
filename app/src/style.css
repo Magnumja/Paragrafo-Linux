@@ -1,0 +1,34 @@
+/* Parágrafo: papel de leitura, verde-musgo de destaque e cartões do libadwaita. */
+
+.paper { background-color: @view_bg_color; }
+.pdf-backdrop { background-color: alpha(currentColor, 0.06); }
+
+.reading-page { padding: 26px 28px; }
+.page-title { font-family: serif; font-size: 26px; font-weight: 500; }
+.section-label { font-size: 10px; font-weight: 600; letter-spacing: 1.3px; }
+.accent { color: @accent_color; }
+
+.paragraph { padding: 14px 12px; border-radius: 10px; transition: background-color 250ms; }
+.paragraph:hover, .paragraph:focus-within { background-color: alpha(currentColor, 0.04); }
+.paragraph.highlighted { background-color: alpha(@accent_bg_color, 0.18); }
+.paragraph .number { font-size: 0.8em; font-feature-settings: "tnum"; }
+.paragraph .actions { opacity: 0; transition: opacity 150ms; }
+.paragraph:hover .actions, .paragraph:focus-within .actions { opacity: 1; }
+.original { opacity: 0.74; }
+.pending { opacity: 0.6; }
+
+.start-title { font-family: serif; font-size: 30px; }
+.drop-zone { border: 1.5px dashed alpha(currentColor, 0.24); border-radius: 18px; padding: 24px; transition: all 200ms; }
+.drop-zone.targeted { border-color: @accent_color; background-color: alpha(@accent_bg_color, 0.10); }
+
+.done-label { color: @accent_color; background-color: alpha(@accent_bg_color, 0.14); border-radius: 8px; padding: 8px; font-weight: 500; }
+.page-status { font-size: 0.8em; font-feature-settings: "tnum"; }
+
+.bubble { background-color: alpha(@accent_bg_color, 0.20); border-radius: 14px; padding: 8px 12px; }
+.source { padding: 8px 10px; font-weight: normal; }
+.badge { min-width: 18px; min-height: 18px; border-radius: 9px; font-size: 0.75em; font-weight: 600; color: @accent_color; background-color: alpha(@accent_bg_color, 0.20); }
+.suggestion { padding: 10px 12px; font-weight: normal; }
+.composer { border-radius: 16px; padding: 4px 4px 4px 8px; background-color: alpha(currentColor, 0.06); }
+.composer:focus-within { outline: 1.5px solid alpha(@accent_color, 0.7); }
+.composer entry { background: none; outline: none; box-shadow: none; }
+.chat-title { font-family: serif; font-size: 20px; font-weight: 500; }
