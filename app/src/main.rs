@@ -13,7 +13,7 @@ use paragrafo_core::language::{self, language_name, LANGUAGES};
 use paragrafo_core::library::{Library, RecentDocument, SavedDocument};
 use paragrafo_core::ollama::{OllamaClient, OllamaError};
 use paragrafo_core::settings::{Settings, DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE};
-use paragrafo_core::text::{now, prefix};
+use paragrafo_core::text::{now, plural, prefix};
 use paragrafo_core::translate;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -22,12 +22,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const APP_ID: &str = "io.github.magnumja.Paragrafo";
 const LOGO: &[u8] = include_bytes!("../../data/paragrafo-logo.png");
 const LOGO_WHITE: &[u8] = include_bytes!("../../data/paragrafo-logo-white.png");
 const STYLE: &str = include_str!("style.css");
+const NUMBER_WIDTH: i32 = 24;
+const ACTIONS_WIDTH: i32 = 34;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -73,9 +75,19 @@ pub enum Event {
     Imported { run: u64, path: PathBuf, result: Result<Extracted, ImportFailure> },
     TranslationModel { run: u64, model: String },
     Translating { run: u64, index: usize },
-    Translated { run: u64, index: usize, text: String },
-    TranslationEnded { run: u64, error: Option<String> },
+    Translated { run: u64, index: usize, text: String, kept_original: bool },
+    TranslationEnded { run: u64, failure: Option<Failure> },
     Chat(chat::ChatEvent),
+}
+
+/// Why translation could not start or go on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Failure {
+    /// Ollama is not installed, or not running.
+    NoOllama,
+    /// Ollama runs, but no model that can translate is installed.
+    NoModel,
+    Message(String),
 }
 
 pub struct State {
@@ -106,6 +118,12 @@ pub struct State {
     cancel: Arc<AtomicBool>,
     translated_in_run: usize,
     translation_model: String,
+    /// Shown in the sidebar until translation can run; cleared when a run starts.
+    issue: Option<Failure>,
+    /// Start translating once the model being downloaded is ready.
+    translate_after_pull: bool,
+    run_started: Option<Instant>,
+    kept_original: usize,
     pub settings: Settings,
 }
 
@@ -143,6 +161,7 @@ struct Ui {
     percent_label: gtk::Label,
     translate: gtk::Button,
     done_label: gtk::Label,
+    issue_box: gtk::Box,
     pages: gtk::ListBox,
     import_progress: gtk::ProgressBar,
     import_cancel: gtk::Button,
@@ -153,6 +172,8 @@ struct Ui {
 struct RowWidgets {
     container: gtk::Box,
     slot: gtk::Box,
+    /// Enabled once the paragraph has a translation; updated with the row.
+    copy_translation: gio::SimpleAction,
 }
 
 #[derive(Default)]
@@ -179,6 +200,10 @@ pub struct App {
     font: gtk::CssProvider,
     page: RefCell<PageWidgets>,
     pending_open: RefCell<Option<PathBuf>>,
+    toasts: adw::ToastOverlay,
+    recents_shown: RefCell<Vec<RecentDocument>>,
+    /// What the sidebar's translation card shows now, so it is rebuilt only when that changes.
+    issue_shown: RefCell<String>,
 }
 
 // Small widget helpers
@@ -211,6 +236,14 @@ fn labelled_button(label: &str, title: &str) -> gtk::Button {
     let button = gtk::Button::builder().label(label).tooltip_text(title).build();
     button.update_property(&[gtk::accessible::Property::Label(title)]);
     button
+}
+
+/// A short label that never wraps (a wrapping one breaks letter by letter when space is tight).
+fn caption_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::builder().label(text).xalign(0.0).build();
+    label.add_css_class("caption");
+    label.add_css_class("dim-label");
+    label
 }
 
 fn relative_time(opened: f64) -> String {
@@ -268,7 +301,7 @@ fn build_ui() -> Ui {
     recents_box.append(&recents_list);
 
     let features = gtk::Label::builder()
-        .label("Original e tradução lado a lado  ·  Perguntas com Llama local  ·  Nada sai do seu computador")
+        .label("Original e tradução lado a lado  ·  Perguntas com Llama local\nNada sai do seu computador")
         .justify(gtk::Justification::Center)
         .wrap(true)
         .margin_top(36)
@@ -289,7 +322,7 @@ fn build_ui() -> Ui {
     // Toolbar
     let home = icon_button("user-home-symbolic", "Voltar à tela inicial. O progresso fica salvo.");
     let sidebar_toggle = gtk::ToggleButton::builder()
-        .label("Páginas").tooltip_text("Mostrar ou ocultar as páginas").active(true).build();
+        .icon_name("sidebar-show-symbolic").tooltip_text("Mostrar ou ocultar as páginas").active(true).build();
     sidebar_toggle.update_property(&[gtk::accessible::Property::Label("Páginas")]);
     let modes = Mode::ALL.map(|mode| gtk::ToggleButton::builder().label(mode.title()).build());
     modes[1].set_group(Some(&modes[0]));
@@ -349,9 +382,9 @@ fn build_ui() -> Ui {
     target.set_hexpand(true);
     target.update_property(&[gtk::accessible::Property::Label("Idioma de destino")]);
     let languages = gtk::Grid::builder().row_spacing(6).column_spacing(8).build();
-    languages.attach(&text_label("De", &["caption", "dim-label"]), 0, 0, 1, 1);
+    languages.attach(&caption_label("De"), 0, 0, 1, 1);
     languages.attach(&source, 1, 0, 1, 1);
-    languages.attach(&text_label("Para", &["caption", "dim-label"]), 0, 1, 1, 1);
+    languages.attach(&caption_label("Para"), 0, 1, 1, 1);
     languages.attach(&target, 1, 1, 1, 1);
     let progress = gtk::ProgressBar::new();
     progress.update_property(&[gtk::accessible::Property::Label("Progresso da tradução")]);
@@ -364,8 +397,11 @@ fn build_ui() -> Ui {
     let translate = gtk::Button::builder().label("Traduzir documento").tooltip_text("Começa pela página que você está lendo").build();
     let done_label = gtk::Label::builder().label("Tradução concluída").visible(false).build();
     done_label.add_css_class("done-label");
+    let issue_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).visible(false).build();
+    issue_box.add_css_class("card");
+    issue_box.add_css_class("issue");
     let controls = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).margin_top(8).margin_bottom(12).margin_start(14).margin_end(14).build();
-    for widget in [file_label.upcast_ref::<gtk::Widget>(), counts_label.upcast_ref(), languages.upcast_ref(), progress.upcast_ref(), progress_row.upcast_ref(), translate.upcast_ref(), done_label.upcast_ref()] {
+    for widget in [file_label.upcast_ref::<gtk::Widget>(), counts_label.upcast_ref(), languages.upcast_ref(), progress.upcast_ref(), progress_row.upcast_ref(), translate.upcast_ref(), done_label.upcast_ref(), issue_box.upcast_ref()] {
         controls.append(widget);
     }
     let pages = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).build();
@@ -449,6 +485,7 @@ fn build_ui() -> Ui {
         percent_label,
         translate,
         done_label,
+        issue_box,
         pages,
         import_progress,
         import_cancel,
@@ -461,11 +498,14 @@ impl App {
     fn new(application: &adw::Application) -> Rc<Self> {
         let settings = Settings::load();
         let library = Library::default();
-        let window = adw::ApplicationWindow::builder().application(application).title("Parágrafo").default_width(1400).default_height(880).width_request(720).height_request(520).build();
+        let window = adw::ApplicationWindow::builder().application(application).title("Parágrafo").default_width(1400).default_height(880).width_request(760).height_request(520).build();
         let ui = build_ui();
         let (chat_ui, panel) = chat::build();
         ui.inner.set_sidebar(Some(&panel));
-        window.set_content(Some(&ui.root));
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&ui.root));
+        window.set_content(Some(&toasts));
+        Self::add_breakpoints(&window, &ui);
         let (tx, rx) = async_channel::unbounded::<Event>();
         let state = State {
             doc: DocumentState::default(),
@@ -493,6 +533,10 @@ impl App {
             cancel: Arc::new(AtomicBool::new(false)),
             translated_in_run: 0,
             translation_model: String::new(),
+            issue: None,
+            translate_after_pull: false,
+            run_started: None,
+            kept_original: 0,
             settings: settings.clone(),
         };
         let app = Rc::new(App {
@@ -509,6 +553,9 @@ impl App {
             font: gtk::CssProvider::new(),
             page: RefCell::new(PageWidgets::default()),
             pending_open: RefCell::new(None),
+            toasts,
+            recents_shown: RefCell::new(vec![RecentDocument { id: "-".into(), name: String::new(), path: String::new(), pages: 0, paragraphs: 0, completed: 0, opened: 0.0 }]),
+            issue_shown: RefCell::new(String::new()),
         });
         app.install_styles();
         app.connect(application);
@@ -523,6 +570,29 @@ impl App {
         app.refresh();
         app.chat_refresh();
         app
+    }
+
+    /// Below 1180 sp the assistant floats over the text; below 980 sp the page list does too, and the
+    /// page and text-size buttons leave the toolbar (the keyboard, the pager under the text and Ctrl+± still work).
+    fn add_breakpoints(window: &adw::ApplicationWindow, ui: &Ui) {
+        let narrow = |width: f64| adw::Breakpoint::new(adw::BreakpointCondition::new_length(adw::BreakpointConditionLengthType::MaxWidth, width, adw::LengthUnit::Sp));
+        let medium = narrow(1180.0);
+        medium.add_setter(&ui.inner, "collapsed", Some(&true.to_value()));
+        medium.add_setter(&ui.inner, "show-sidebar", Some(&false.to_value()));
+        window.add_breakpoint(medium);
+        let small = narrow(980.0);
+        small.add_setter(&ui.inner, "collapsed", Some(&true.to_value()));
+        small.add_setter(&ui.inner, "show-sidebar", Some(&false.to_value()));
+        small.add_setter(&ui.split, "collapsed", Some(&true.to_value()));
+        small.add_setter(&ui.split, "show-sidebar", Some(&false.to_value()));
+        let toolbar = ui.previous.parent();
+        if let Some(pager) = toolbar {
+            small.add_setter(&pager, "visible", Some(&false.to_value()));
+        }
+        if let Some(sizes) = ui.smaller.parent() {
+            small.add_setter(&sizes, "visible", Some(&false.to_value()));
+        }
+        window.add_breakpoint(small);
     }
 
     // Styles
@@ -613,12 +683,20 @@ impl App {
                 }
             });
         }
+        ui.sidebar_toggle.bind_property("active", &ui.split, "show-sidebar").bidirectional().sync_create().build();
+        ui.assistant_toggle.bind_property("active", &ui.inner, "show-sidebar").bidirectional().sync_create().build();
         let app = self.clone();
-        ui.sidebar_toggle.connect_toggled(move |button| app.ui.split.set_show_sidebar(button.is_active()));
-        let app = self.clone();
-        ui.assistant_toggle.connect_toggled(move |button| {
-            if !app.updating.get() {
-                app.show_assistant(button.is_active());
+        ui.inner.connect_show_sidebar_notify(move |view| {
+            // A floating panel closed by a narrow window is not a choice to remember.
+            if !view.is_collapsed() {
+                let mut state = app.state.borrow_mut();
+                if state.settings.show_assistant != view.shows_sidebar() {
+                    state.settings.show_assistant = view.shows_sidebar();
+                    state.settings.save();
+                }
+            }
+            if view.shows_sidebar() {
+                app.chat_prepare();
             }
         });
         let app = self.clone();
@@ -765,10 +843,16 @@ impl App {
             }
             Event::Imported { run, path, result } => self.imported(run, path, result),
             Event::TranslationModel { run, model } => {
-                let mut state = self.state.borrow_mut();
-                if state.run == run {
+                {
+                    let mut state = self.state.borrow_mut();
+                    if state.run != run {
+                        return;
+                    }
+                    state.status = format!("Carregando {model}… a primeira resposta pode levar alguns segundos.");
                     state.translation_model = model;
+                    state.run_started = Some(Instant::now());
                 }
+                self.refresh_sidebar();
             }
             Event::Translating { run, index } => {
                 let previous = {
@@ -776,7 +860,9 @@ impl App {
                     if state.run != run || state.phase != Phase::Translating {
                         return;
                     }
-                    state.status = format!("Traduzindo com {} · {} de {}", state.translation_model, state.doc.completed() + 1, state.doc.count());
+                    if state.translated_in_run > 0 {
+                        state.status = Self::translating_status(&state);
+                    }
                     state.active.replace(index)
                 };
                 if let Some(previous) = previous {
@@ -785,7 +871,7 @@ impl App {
                 self.update_row(index);
                 self.refresh_sidebar();
             }
-            Event::Translated { run, index, text } => {
+            Event::Translated { run, index, text, kept_original } => {
                 let save = {
                     let mut state = self.state.borrow_mut();
                     if state.run != run {
@@ -793,6 +879,8 @@ impl App {
                     }
                     state.doc.apply(&text, index);
                     state.translated_in_run += 1;
+                    state.kept_original += usize::from(kept_original);
+                    state.status = Self::translating_status(&state);
                     state.translated_in_run.is_multiple_of(20)
                 };
                 if save {
@@ -802,9 +890,23 @@ impl App {
                 self.refresh_sidebar();
                 self.refresh_toolbar();
             }
-            Event::TranslationEnded { run, error } => self.translation_ended(run, error),
+            Event::TranslationEnded { run, failure } => self.translation_ended(run, failure),
             Event::Chat(event) => self.chat_handle(event),
         }
+    }
+
+    /// "Traduzindo com llama3.2:3b · 12 de 80 · cerca de 6 min restantes".
+    fn translating_status(state: &State) -> String {
+        let mut status = format!("Traduzindo com {} · {} de {}", state.translation_model, (state.doc.completed() + 1).min(state.doc.count()), state.doc.count());
+        if let (Some(started), true) = (state.run_started, state.translated_in_run >= 2) {
+            let each = started.elapsed().as_secs_f64() / state.translated_in_run as f64;
+            let left = (each * state.doc.count().saturating_sub(state.doc.completed()) as f64 / 60.0).ceil() as usize;
+            status += &match left {
+                0 | 1 => " · menos de 2 min restantes".to_string(),
+                _ => format!(" · cerca de {left} min restantes"),
+            };
+        }
+        status
     }
 
     // Opening documents
@@ -833,7 +935,11 @@ impl App {
         let (run, cancel) = {
             let mut state = self.state.borrow_mut();
             if state.phase != Phase::Idle {
+                let waiting = if state.phase == Phase::Translating { "a tradução pausar ou terminar" } else { "a importação atual terminar" };
+                state.status = format!("“{}” abre quando {waiting}.", file_name(&path));
                 self.pending_open.replace(Some(path));
+                drop(state);
+                self.refresh_sidebar();
                 return;
             }
             state.run += 1;
@@ -925,9 +1031,9 @@ impl App {
             state.path = Some(path);
             state.fingerprint = result.fingerprint;
             state.status = if restored > 0 {
-                format!("{restored} de {} parágrafos já traduzidos foram restaurados.", state.doc.count())
+                format!("{restored} de {} já traduzidos foram restaurados.", plural(state.doc.count(), "parágrafo", "parágrafos"))
             } else {
-                format!("{} parágrafos prontos para traduzir.", state.doc.count())
+                format!("{} para traduzir.", plural(state.doc.count(), "parágrafo pronto", "parágrafos prontos"))
             };
             let mut notice = Vec::new();
             if result.ocr_pages > 0 {
@@ -951,7 +1057,8 @@ impl App {
             (state.settings.show_assistant, state.doc.paragraphs().to_vec(), state.fingerprint.clone())
         };
         self.chat_attach(paragraphs, &fingerprint);
-        self.show_assistant(show);
+        // In a narrow window the assistant would cover the text the user just opened.
+        self.show_assistant(show && !self.ui.inner.is_collapsed());
     }
 
     fn open_pending(self: &Rc<Self>) {
@@ -1023,14 +1130,47 @@ impl App {
     // Languages and translation
 
     fn choose_language(self: &Rc<Self>, source: Option<String>, target: Option<String>) {
-        {
-            let mut state = self.state.borrow_mut();
+        let (source, target, translated) = {
+            let state = self.state.borrow();
             if state.phase != Phase::Idle {
                 return;
             }
             let source = source.unwrap_or_else(|| state.source.clone());
             let target = target.unwrap_or_else(|| state.target.clone());
             if source == state.source && target == state.target {
+                return;
+            }
+            let translated = state.doc.paragraphs().iter().filter(|p| !p.translated.is_empty() && language::needs_translation(&p.original)).count();
+            (source, target, translated)
+        };
+        if translated == 0 {
+            return self.apply_languages(source, target);
+        }
+        let dialog = adw::AlertDialog::new(
+            Some("Trocar o idioma?"),
+            Some(&format!("A tradução pertence ao par de idiomas. Trocar apaga {} já {}; o original não muda.", plural(translated, "parágrafo", "parágrafos"), if translated == 1 { "traduzido" } else { "traduzidos" })),
+        );
+        dialog.add_response("cancel", "Manter");
+        dialog.add_response("change", "Trocar e apagar");
+        dialog.set_response_appearance("change", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let app = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "change" {
+                app.apply_languages(source.clone(), target.clone());
+            } else {
+                // Put the menus back on the languages the translation is in.
+                app.refresh_languages();
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    fn apply_languages(self: &Rc<Self>, source: String, target: String) {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.phase != Phase::Idle {
                 return;
             }
             state.source = source;
@@ -1083,6 +1223,9 @@ impl App {
                             state.stopping = false;
                             state.run += 1;
                             state.translated_in_run = 0;
+                            state.kept_original = 0;
+                            state.run_started = None;
+                            state.issue = None;
                             state.cancel = Arc::new(AtomicBool::new(false));
                             state.status = format!("Preparando {} → {}…", language_name(&origin), language_name(&state.target));
                             let pending: Vec<(usize, String)> =
@@ -1118,12 +1261,10 @@ impl App {
             let (availability, installed, chat_models, chosen) = (checked.availability.clone(), checked.installed.clone(), checked.chat_models.clone(), checked.chat_model.clone());
             send(Event::Chat(chat::ChatEvent::Checked(checked)));
             if availability == assistant::Availability::ServerOff {
-                let message = "O Ollama não está em execução. A tradução é feita por um modelo local: instale o Ollama (ollama.com/download), inicie-o e tente de novo.";
-                return send(Event::TranslationEnded { run, error: Some(message.into()) });
+                return send(Event::TranslationEnded { run, failure: Some(Failure::NoOllama) });
             }
             let Some(model) = translate::pick_model(&installed, &chat_models, &chosen) else {
-                let message = "Nenhum modelo para traduzir está instalado no Ollama. Baixe um, por exemplo: ollama pull translategemma:4b";
-                return send(Event::TranslationEnded { run, error: Some(message.into()) });
+                return send(Event::TranslationEnded { run, failure: Some(Failure::NoModel) });
             };
             send(Event::TranslationModel { run, model: model.clone() });
             // Sequential calls keep pause boundaries exact; the page being read goes first.
@@ -1133,29 +1274,39 @@ impl App {
                 }
                 send(Event::Translating { run, index });
                 match translate::translate(&client, &model, &origin, &target, &text, &cancel) {
-                    Ok(translated) => send(Event::Translated { run, index, text: translated }),
+                    Ok(translation) => send(Event::Translated { run, index, text: translation.text, kept_original: translation.kept_original }),
                     Err(OllamaError::Cancelled) => break,
-                    Err(error) => return send(Event::TranslationEnded { run, error: Some(error.to_string()) }),
+                    Err(OllamaError::NotRunning) => return send(Event::TranslationEnded { run, failure: Some(Failure::NoOllama) }),
+                    Err(OllamaError::ModelMissing(_)) => return send(Event::TranslationEnded { run, failure: Some(Failure::NoModel) }),
+                    Err(error) => return send(Event::TranslationEnded { run, failure: Some(Failure::Message(error.to_string())) }),
                 }
             }
-            send(Event::TranslationEnded { run, error: None });
+            send(Event::TranslationEnded { run, failure: None });
         });
         self.rebuild_pages();
         self.show_page(false);
         self.refresh();
     }
 
-    fn translation_ended(self: &Rc<Self>, run: u64, error: Option<String>) {
+    fn translation_ended(self: &Rc<Self>, run: u64, failure: Option<Failure>) {
         let previous = {
             let mut state = self.state.borrow_mut();
             if state.run != run || state.phase != Phase::Translating {
                 return;
             }
-            state.status = match (&error, state.doc.is_complete()) {
-                (Some(_), _) => "Não foi possível concluir a tradução.".into(),
-                (None, true) => "Tradução concluída. Revise comparando com o original.".into(),
-                (None, false) => "Tradução pausada. Seu progresso foi mantido.".into(),
+            let kept = match state.kept_original {
+                0 => String::new(),
+                count => format!(" {} no original: o modelo não respondeu.", plural(count, "parágrafo ficou", "parágrafos ficaram")),
             };
+            state.status = match (&failure, state.doc.is_complete()) {
+                (Some(Failure::NoOllama), _) => "Falta o Ollama para traduzir.".into(),
+                (Some(Failure::NoModel), _) => "Falta o modelo de tradução.".into(),
+                (Some(Failure::Message(_)), _) => format!("A tradução parou. O progresso foi mantido.{kept}"),
+                (None, true) => format!("Tradução concluída. Revise comparando com o original.{kept}"),
+                (None, false) => format!("Tradução pausada. Seu progresso foi mantido.{kept}"),
+            };
+            // What to do next is shown in the sidebar, where the button is, not in a dialog that goes away.
+            state.issue = failure;
             state.phase = Phase::Idle;
             state.stopping = false;
             state.active.take()
@@ -1165,10 +1316,90 @@ impl App {
             self.update_row(previous);
         }
         self.refresh();
-        if let Some(error) = error {
-            self.alert(&format!("Não foi possível traduzir. O progresso foi mantido.\n\n{error}"));
-        }
         self.open_pending();
+    }
+
+    /// Downloads the model that translates (and answers), then translates.
+    fn download_translation_model(self: &Rc<Self>) {
+        self.state.borrow_mut().translate_after_pull = true;
+        self.pull_models(vec![assistant::DEFAULT_CHAT_MODEL.to_string()]);
+    }
+
+    /// The card under the translate button: why translation cannot run and the one step that fixes it.
+    fn refresh_issue(self: &Rc<Self>) {
+        let (issue, phase) = {
+            let state = self.state.borrow();
+            (state.issue.clone(), state.phase)
+        };
+        let pulling = match &self.chat.borrow().availability_now() {
+            assistant::Availability::Pulling(model, progress) => Some((model.clone(), *progress)),
+            _ => None,
+        };
+        let visible = issue.is_some() && phase == Phase::Idle;
+        let signature = format!("{issue:?}|{}|{visible}", pulling.as_ref().map_or(String::new(), |(model, _)| model.clone()));
+        let card = &self.ui.issue_box;
+        card.set_visible(visible);
+        if let (Some((_, progress)), Some(bar)) = (&pulling, card.last_child().and_downcast::<gtk::ProgressBar>()) {
+            bar.set_fraction(*progress);
+            bar.set_text(Some(&format!("{}%", (progress * 100.0) as u32)));
+        }
+        if *self.issue_shown.borrow() == signature {
+            return;
+        }
+        self.issue_shown.replace(signature);
+        clear(card);
+        let Some(issue) = issue.filter(|_| visible) else { return };
+        let (title, body) = match &issue {
+            Failure::NoOllama => (
+                "Falta o Ollama para traduzir",
+                "No Linux, a tradução é feita por um modelo que roda no seu computador pelo Ollama. Para instalar o Ollama e o modelo, rode na pasta do Parágrafo:".to_string(),
+            ),
+            Failure::NoModel => (
+                "Falta o modelo de tradução",
+                format!("Necessário uma única vez: {} (cerca de 2 GB). O download fica guardado no Ollama.", assistant::DEFAULT_CHAT_MODEL),
+            ),
+            Failure::Message(message) => ("A tradução parou", message.clone()),
+        };
+        card.append(&text_label(title, &["heading"]));
+        card.append(&text_label(&body, &["caption"]));
+        let primary = |label: &str| {
+            let button = gtk::Button::with_label(label);
+            button.add_css_class("suggested-action");
+            button
+        };
+        match issue {
+            Failure::NoOllama => {
+                let command = gtk::Label::builder().label("./scripts/install.sh").selectable(true).xalign(0.0).build();
+                command.add_css_class("monospace");
+                command.add_css_class("command");
+                card.append(&command);
+                let retry = primary("Tentar novamente");
+                let app = self.clone();
+                retry.connect_clicked(move |_| app.start_translation());
+                card.append(&retry);
+                card.append(&gtk::LinkButton::with_label("https://ollama.com/download", "Ou instale pelo site do Ollama"));
+            }
+            Failure::NoModel => match pulling {
+                Some((model, progress)) => {
+                    card.append(&text_label(&format!("Baixando {model}…"), &["caption", "dim-label"]));
+                    let bar = gtk::ProgressBar::builder().fraction(progress).show_text(true).build();
+                    bar.set_text(Some(&format!("{}%", (progress * 100.0) as u32)));
+                    card.append(&bar);
+                }
+                None => {
+                    let download = primary("Baixar e traduzir");
+                    let app = self.clone();
+                    download.connect_clicked(move |_| app.download_translation_model());
+                    card.append(&download);
+                }
+            },
+            Failure::Message(_) => {
+                let retry = primary("Tentar novamente");
+                let app = self.clone();
+                retry.connect_clicked(move |_| app.start_translation());
+                card.append(&retry);
+            }
+        }
     }
 
     // Navigation
@@ -1265,21 +1496,10 @@ impl App {
     }
 
     fn toggle_assistant(self: &Rc<Self>) {
-        let show = !self.state.borrow().settings.show_assistant;
-        self.show_assistant(show);
+        self.show_assistant(!self.ui.inner.shows_sidebar());
     }
 
     pub fn show_assistant(self: &Rc<Self>, show: bool) {
-        {
-            let mut state = self.state.borrow_mut();
-            if state.settings.show_assistant != show {
-                state.settings.show_assistant = show;
-                state.settings.save();
-            }
-        }
-        self.updating.set(true);
-        self.ui.assistant_toggle.set_active(show);
-        self.updating.set(false);
         self.ui.inner.set_show_sidebar(show);
         if show {
             self.chat_prepare();
@@ -1308,7 +1528,26 @@ impl App {
     }
 
     /// The original page, with the paragraph marked, shown over the reading view. Esc returns to reading.
-    fn peek(self: &Rc<Self>, index: usize, anchor: &gtk::Button) {
+    fn copy_paragraph(&self, index: usize, translation: bool) {
+        let text = {
+            let state = self.state.borrow();
+            let Some(paragraph) = state.doc.paragraphs().get(index) else { return };
+            if translation { paragraph.translated.clone() } else { paragraph.original.clone() }
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.window.clipboard().set_text(&text);
+        self.toast(if translation { "Tradução copiada" } else { "Original copiado" });
+    }
+
+    pub fn toast(&self, message: &str) {
+        let toast = adw::Toast::new(message);
+        toast.set_timeout(2);
+        self.toasts.add_toast(toast);
+    }
+
+    fn peek(self: &Rc<Self>, index: usize, anchor: &gtk::Widget) {
         let (document, page, bounds) = {
             let state = self.state.borrow();
             let Some(paragraph) = state.doc.paragraphs().get(index) else { return };
@@ -1332,7 +1571,11 @@ impl App {
         content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         content.append(&view);
         popover.set_child(Some(&content));
-        popover.set_parent(anchor);
+        let host = self.ui.reading.clone();
+        popover.set_parent(&host);
+        if let Some(bounds) = anchor.compute_bounds(&host) {
+            popover.set_pointing_to(Some(&gdk::Rectangle::new(bounds.x() as i32, bounds.y() as i32, bounds.width() as i32, bounds.height() as i32)));
+        }
         let closing = popover.clone();
         close.connect_clicked(move |_| closing.popdown());
         let (app, closing) = (self.clone(), popover.clone());
@@ -1413,6 +1656,7 @@ impl App {
 
     fn refresh(self: &Rc<Self>) {
         self.refresh_start();
+        self.refresh_issue();
         self.refresh_sidebar();
         self.refresh_toolbar();
     }
@@ -1427,6 +1671,10 @@ impl App {
         ui.start_cancel.set_sensitive(!state.stopping);
         ui.drop_zone.set_visible(!importing);
         ui.recents_box.set_visible(!importing && !state.recents.is_empty());
+        if *self.recents_shown.borrow() == state.recents {
+            return;
+        }
+        self.recents_shown.replace(state.recents.clone());
         ui.recents_list.remove_all();
         for recent in state.recents.iter().take(5) {
             let percent = (recent.completed * 100).checked_div(recent.paragraphs).unwrap_or(0);
@@ -1436,7 +1684,7 @@ impl App {
                 _ => format!("{percent}% traduzido"),
             };
             let name = gtk::Label::builder().label(&recent.name).xalign(0.0).ellipsize(pango::EllipsizeMode::Middle).tooltip_text(&recent.name).build();
-            let detail = text_label(&format!("{} páginas · {progress}", recent.pages), &["caption", "dim-label"]);
+            let detail = text_label(&format!("{} · {progress}", plural(recent.pages, "página", "páginas")), &["caption", "dim-label"]);
             let texts = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
             texts.append(&name);
             texts.append(&detail);
@@ -1463,7 +1711,7 @@ impl App {
         let busy = state.phase != Phase::Idle;
         ui.file_label.set_text(&state.filename);
         ui.file_label.set_tooltip_text(Some(&state.filename));
-        ui.counts_label.set_text(&format!("{} páginas · {} parágrafos", state.page_count, state.doc.count()));
+        ui.counts_label.set_text(&format!("{} · {}", plural(state.page_count, "página", "páginas"), plural(state.doc.count(), "parágrafo", "parágrafos")));
         let fraction = state.doc.completed() as f64 / state.doc.count().max(1) as f64;
         ui.progress.set_fraction(fraction);
         ui.progress_label.set_text(&format!("{} de {} parágrafos", state.doc.completed(), state.doc.count()));
@@ -1675,9 +1923,14 @@ impl App {
             let origin = if state.source == "auto" { state.detected.clone().unwrap_or_default() } else { state.source.clone() };
             let original = section_label(&format!("Original · {}", language_name(&origin)));
             let translated = text_label(&language_name(&state.target).to_uppercase(), &["section-label", "accent"]);
-            let labels = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(36).homogeneous(true).margin_start(50).margin_end(116).margin_bottom(6).build();
-            labels.append(&original);
-            labels.append(&translated);
+            // Same widths as a paragraph row, so each label sits right above its column.
+            let columns = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(36).homogeneous(true).hexpand(true).build();
+            columns.append(&original);
+            columns.append(&translated);
+            let labels = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(14).margin_start(12).margin_end(12).margin_bottom(2).build();
+            labels.append(&gtk::Box::builder().width_request(NUMBER_WIDTH).build());
+            labels.append(&columns);
+            labels.append(&gtk::Box::builder().width_request(ACTIONS_WIDTH).build());
             column.append(&labels);
         }
 
@@ -1686,7 +1939,7 @@ impl App {
             let row = self.paragraph_row(state, index, translation_only);
             column.append(&row.container);
             if index + 1 != range.end {
-                column.append(&gtk::Separator::builder().orientation(gtk::Orientation::Horizontal).margin_start(46).build());
+                column.append(&gtk::Separator::builder().orientation(gtk::Orientation::Horizontal).margin_start(50).build());
             }
             rows.insert(index, row);
         }
@@ -1735,7 +1988,7 @@ impl App {
         if state.highlighted.as_ref().is_some_and(|range| range.contains(&index)) {
             container.add_css_class("highlighted");
         }
-        let number = gtk::Label::builder().label((index + 1).to_string()).width_request(24).xalign(1.0).valign(gtk::Align::Start).build();
+        let number = gtk::Label::builder().label((index + 1).to_string()).width_request(NUMBER_WIDTH).xalign(1.0).valign(gtk::Align::Start).build();
         number.add_css_class("number");
         number.add_css_class("dim-label");
         number.update_property(&[gtk::accessible::Property::Label(&format!("Parágrafo {}", index + 1))]);
@@ -1752,31 +2005,65 @@ impl App {
             container.append(&columns);
         }
 
-        let actions = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(2).valign(gtk::Align::Start).build();
-        actions.add_css_class("actions");
-        let copy = icon_button("edit-copy-symbolic", "Copiar a tradução (ou o original, se ainda não traduzido)");
-        let ask = icon_button("dialog-question-symbolic", "Perguntar sobre este trecho");
-        let show = icon_button("find-location-symbolic", "Mostrar no PDF original");
-        for button in [&copy, &ask, &show] {
-            button.add_css_class("flat");
-            actions.append(button);
-        }
+        // One menu per paragraph (also on right click): a short paragraph stays one line tall,
+        // and every action is reachable from the keyboard.
+        let more = gtk::MenuButton::builder().icon_name("view-more-symbolic").valign(gtk::Align::Start).width_request(ACTIONS_WIDTH).tooltip_text("Ações do parágrafo").build();
+        let actions = gio::SimpleActionGroup::new();
+        let add = |name: &str, run: Box<dyn Fn()>| {
+            let action = gio::SimpleAction::new(name, None);
+            action.connect_activate(move |_, _| run());
+            actions.add_action(&action);
+            action
+        };
         let app = self.clone();
-        copy.connect_clicked(move |button| {
-            let text = app.state.borrow().doc.paragraphs().get(index).map(|p| if p.translated.is_empty() { p.original.clone() } else { p.translated.clone() });
-            if let Some(text) = text {
-                button.clipboard().set_text(&text);
-                button.set_icon_name("object-select-symbolic");
-                let button = button.clone();
-                glib::timeout_add_local_once(Duration::from_millis(1400), move || button.set_icon_name("edit-copy-symbolic"));
-            }
+        let copy_translation = add("copy-translation", Box::new(move || app.copy_paragraph(index, true)));
+        copy_translation.set_enabled(!paragraph.translated.is_empty());
+        let app = self.clone();
+        add("copy-original", Box::new(move || app.copy_paragraph(index, false)));
+        let app = self.clone();
+        add("ask", Box::new(move || app.ask_about(index)));
+        // The peek points at this button: a small target at the right edge leaves room for it beside the text.
+        let (app, anchor) = (self.clone(), more.clone());
+        add(
+            "peek",
+            Box::new(move || {
+                // The menu is still closing and would take the new popover down with it; open it right after.
+                let (app, anchor) = (app.clone(), anchor.clone());
+                glib::timeout_add_local_once(Duration::from_millis(120), move || app.peek(index, anchor.upcast_ref()));
+            }),
+        );
+        let app = self.clone();
+        add("open-pdf", Box::new(move || app.open_in_pdf(index)));
+        container.insert_action_group("row", Some(&actions));
+        let menu = gio::Menu::new();
+        let copies = gio::Menu::new();
+        copies.append(Some("Copiar tradução"), Some("row.copy-translation"));
+        copies.append(Some("Copiar original"), Some("row.copy-original"));
+        menu.append_section(None, &copies);
+        let reading = gio::Menu::new();
+        reading.append(Some("Perguntar sobre este trecho"), Some("row.ask"));
+        reading.append(Some("Mostrar no PDF original"), Some("row.peek"));
+        reading.append(Some("Abrir no modo PDF original"), Some("row.open-pdf"));
+        menu.append_section(None, &reading);
+        more.set_menu_model(Some(&menu));
+        more.add_css_class("flat");
+        more.add_css_class("actions");
+        more.update_property(&[gtk::accessible::Property::Label(&format!("Ações do parágrafo {}", index + 1))]);
+        let context = gtk::PopoverMenu::builder().menu_model(&menu).has_arrow(false).halign(gtk::Align::Start).build();
+        context.set_parent(&container);
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
+        let popover = context.clone();
+        click.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.popup();
         });
-        let app = self.clone();
-        ask.connect_clicked(move |_| app.ask_about(index));
-        let app = self.clone();
-        show.connect_clicked(move |button| app.peek(index, button));
+        container.add_controller(click);
+        // The context menu belongs to this row; it goes when the row goes.
+        container.connect_destroy(move |_| context.unparent());
+        let actions = more;
         container.append(&actions);
-        RowWidgets { container, slot }
+        RowWidgets { container, slot, copy_translation }
     }
 
     fn fill_slot(slot: &gtk::Box, paragraph: &extraction::Paragraph, active: bool, translation_only: bool) {
@@ -1811,6 +2098,7 @@ impl App {
         let page = self.page.borrow();
         if let Some(row) = page.rows.get(&index) {
             Self::fill_slot(&row.slot, paragraph, state.active == Some(index), state.mode == Mode::Translation);
+            row.copy_translation.set_enabled(!paragraph.translated.is_empty());
         }
         if let Some((snippet, progress)) = page.sidebar.get(&paragraph.page) {
             let (snippet_text, progress_text) = Self::page_status(&state, paragraph.page);

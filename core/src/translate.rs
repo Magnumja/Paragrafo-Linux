@@ -3,7 +3,9 @@
 
 use crate::language::english_name;
 use crate::ollama::{has_model, ChatOptions, OllamaClient, OllamaError, OllamaMessage};
+use regex::Regex;
 use std::sync::atomic::AtomicBool;
+use std::sync::OnceLock;
 
 /// A model made for translation; used when installed (`ollama pull translategemma:4b`).
 pub const PREFERRED_MODEL: &str = "translategemma";
@@ -32,9 +34,28 @@ pub fn prompt(source: &str, target: &str, text: &str) -> Vec<OllamaMessage> {
     )]
 }
 
-/// Models sometimes wrap the translation in quotes or a code fence the original never had.
+fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
+    cell.get_or_init(|| Regex::new(pattern).expect("regex válida"))
+}
+
+/// What a model adds around the translation that the original never had: reasoning blocks of
+/// "thinking" models, a "Here is the translation:" line, a code fence, wrapping quotes.
 pub fn clean(output: &str, original: &str) -> String {
-    let mut text = output.trim();
+    static THINKING: OnceLock<Regex> = OnceLock::new();
+    static PREAMBLE: OnceLock<Regex> = OnceLock::new();
+    let without_thinking = regex(&THINKING, r"(?s)<think>.*?(</think>|$)").replace_all(output, "");
+    let mut text = without_thinking.trim();
+    // Only a whole first line that introduces the answer, and only when an answer follows it.
+    let preamble = regex(
+        &PREAMBLE,
+        r"(?i)^(here is|here's|below is|sure[,!]?|aqui está|aqui esta|segue|claro[,!]?|tradução|traducao|translation|traducción)[^\n]{0,80}:\s*\n",
+    );
+    if let Some(found) = preamble.find(text) {
+        let rest = text[found.end()..].trim();
+        if !rest.is_empty() {
+            text = rest;
+        }
+    }
     if let Some(inner) = text.strip_prefix("```").and_then(|rest| rest.strip_suffix("```")) {
         text = inner.trim_start_matches(|c: char| c.is_alphanumeric()).trim();
     }
@@ -47,14 +68,29 @@ pub fn clean(output: &str, original: &str) -> String {
     text.to_string()
 }
 
-/// Translates one paragraph. Room for the answer grows with the paragraph.
-pub fn translate(client: &OllamaClient, model: &str, source: &str, target: &str, text: &str, cancel: &AtomicBool) -> Result<String, OllamaError> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Translation {
+    pub text: String,
+    /// The model gave nothing usable twice; the paragraph keeps its original text so the rest can go on.
+    pub kept_original: bool,
+}
+
+fn attempt(client: &OllamaClient, model: &str, source: &str, target: &str, text: &str, temperature: f64, cancel: &AtomicBool) -> Result<String, OllamaError> {
     let mut output = String::new();
-    let options = ChatOptions { temperature: 0.0, context_length: 8192, max_tokens: (text.chars().count() * 2).clamp(256, 4096) };
+    // Room for the answer grows with the paragraph.
+    let options = ChatOptions { temperature, context_length: 8192, max_tokens: (text.chars().count() * 2).clamp(256, 4096) };
     client.chat(model, &prompt(source, target, text), options, cancel, |delta| output.push_str(delta))?;
-    let translated = clean(&output, text);
-    if translated.is_empty() {
-        return Err(OllamaError::Server("O modelo devolveu uma tradução vazia.".into()));
+    Ok(clean(&output, text))
+}
+
+/// Translates one paragraph. An empty answer is retried once with a little variation;
+/// a second empty answer keeps the original instead of stopping the whole document.
+pub fn translate(client: &OllamaClient, model: &str, source: &str, target: &str, text: &str, cancel: &AtomicBool) -> Result<Translation, OllamaError> {
+    for temperature in [0.0, 0.3] {
+        let translated = attempt(client, model, source, target, text, temperature, cancel)?;
+        if !translated.is_empty() {
+            return Ok(Translation { text: translated, kept_original: false });
+        }
     }
-    Ok(translated)
+    Ok(Translation { text: text.to_string(), kept_original: true })
 }

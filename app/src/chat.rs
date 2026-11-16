@@ -60,6 +60,10 @@ pub struct ChatState {
 }
 
 impl ChatState {
+    pub fn availability_now(&self) -> &Availability {
+        &self.availability
+    }
+
     pub fn new(chat_model: &str) -> Self {
         Self {
             availability: Availability::Unknown,
@@ -342,10 +346,11 @@ impl App {
         self.chat_refresh();
     }
 
-    fn chat_download(self: &Rc<Self>, models: Vec<String>) {
+    /// Downloads models into Ollama, from the assistant panel or for translation. One download at a time.
+    pub fn pull_models(self: &Rc<Self>, models: Vec<String>) {
         let cancel = {
             let mut chat = self.chat.borrow_mut();
-            if !matches!(chat.availability, Availability::Missing(_)) {
+            if matches!(chat.availability, Availability::Pulling(..)) || models.is_empty() {
                 return;
             }
             chat.availability = Availability::Pulling(models.first().cloned().unwrap_or_default(), 0.0);
@@ -366,7 +371,9 @@ impl App {
             Self::chat_send_event(&tx, ChatEvent::PullEnded(result));
         });
         self.chat_refresh();
+        self.refresh_issue();
     }
+
 
     // Questions
 
@@ -620,6 +627,7 @@ impl App {
             ChatEvent::Pull { model, progress } => {
                 self.chat.borrow_mut().availability = Availability::Pulling(model, progress);
                 self.chat_refresh();
+                self.refresh_issue();
             }
             ChatEvent::PullEnded(result) => {
                 {
@@ -629,9 +637,19 @@ impl App {
                         chat.index_state = IndexState::Failed(error.to_string());
                     }
                 }
-                match result {
+                let translate = std::mem::take(&mut self.state.borrow_mut().translate_after_pull);
+                match &result {
                     Ok(()) => self.chat_prepare(),
                     Err(_) => self.chat_check(false),
+                }
+                match result {
+                    // The download was for translation: carry on with what the user asked for.
+                    Ok(()) if translate => self.start_translation(),
+                    Err(error) if translate => {
+                        self.state.borrow_mut().issue = Some(crate::Failure::Message(format!("O download do modelo falhou: {error}")));
+                        self.refresh_issue();
+                    }
+                    _ => self.refresh_issue(),
                 }
                 self.chat_refresh();
             }
@@ -748,7 +766,7 @@ impl App {
                     download.add_css_class("suggested-action");
                     download.add_css_class("pill");
                     let (app, models) = (self.clone(), models.clone());
-                    download.connect_clicked(move |_| app.chat_download(models.clone()));
+                    download.connect_clicked(move |_| app.pull_models(models.clone()));
                     ui.setup_actions.append(&download);
                 }
                 Availability::Pulling(model, _) => {

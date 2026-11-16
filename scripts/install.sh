@@ -1,17 +1,18 @@
 #!/bin/sh
 # Instala o Parágrafo com um comando só: dependências do sistema, Rust (se faltar), compilação,
-# binário, atalho no menu e ícone.
+# binário, atalho no menu e ícone, e o Ollama com os modelos que traduzem e respondem.
 #
-#   ./scripts/install.sh            instala o app
-#   ./scripts/install.sh --ollama   também instala o Ollama (se faltar) e baixa os modelos
+#   ./scripts/install.sh               instala tudo
+#   ./scripts/install.sh --sem-ollama  só o app (a tradução e as perguntas ficam indisponíveis)
 #
-# Só a instalação de pacotes do sistema pede sudo; o app em si vai para a sua pasta pessoal.
+# Pedem sudo só os pacotes do sistema e o Ollama; o app vai para a sua pasta pessoal.
 set -eu
 cd "$(dirname "$0")/.."
 
-with_ollama=false
+with_ollama=true
 for argument in "$@"; do
     case "$argument" in
+        --sem-ollama | --no-ollama) with_ollama=false ;;
         --ollama) with_ollama=true ;;
         -h | --help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Opção desconhecida: $argument" >&2; exit 2 ;;
@@ -84,6 +85,7 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache 
 
 if $with_ollama; then
     step "Ollama e modelos"
+    # No Linux não há tradutor do sistema: é o Ollama que traduz, e também responde às perguntas.
     if ! command -v ollama >/dev/null 2>&1; then
         curl -fsSL https://ollama.com/install.sh | sh
     fi
@@ -94,13 +96,14 @@ if $with_ollama; then
         started=$!
         sleep 3
     fi
-    ollama pull llama3.2:3b
-    ollama pull bge-m3
+    ollama pull llama3.2:3b   # traduz e responde (cerca de 2 GB)
+    ollama pull bge-m3        # busca no documento (cerca de 1,2 GB)
     if [ -n "$started" ]; then kill "$started" 2>/dev/null || true; fi
+    # Sem o serviço do sistema (por exemplo, sem systemd), o próprio app inicia o "ollama serve" quando precisar.
 fi
 
 step "Pronto"
 echo "Parágrafo instalado em $bin/paragrafo. Procure por \"Parágrafo\" no menu de aplicativos."
 if ! command -v ollama >/dev/null 2>&1; then
-    echo "Para traduzir e perguntar falta o Ollama: rode ./scripts/install.sh --ollama (ou instale por https://ollama.com/download)."
+    echo "Sem o Ollama a tradução e as perguntas ficam indisponíveis. Para instalá-lo, rode ./scripts/install.sh de novo, sem --sem-ollama."
 fi

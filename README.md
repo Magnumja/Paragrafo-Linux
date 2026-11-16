@@ -12,23 +12,27 @@ App nativo para Linux (Rust, GTK 4 e libadwaita): leia um PDF com a tradução a
 
 ## Instalar
 
-Um comando instala tudo: as bibliotecas do sistema, o Rust (se faltar), compila o app e cria o atalho no menu.
+Um comando instala tudo: as bibliotecas do sistema, o Rust (se faltar), o app com atalho no menu, e o Ollama com os modelos que traduzem e respondem.
 
 ```sh
 ./scripts/install.sh
 ```
 
-Para instalar também o Ollama e baixar os modelos de conversa e de busca:
+No Linux não há um tradutor do sistema como o do macOS: quem traduz é um modelo que roda no seu computador pelo [Ollama](https://ollama.com). Por isso o instalador baixa o Ollama e dois modelos, uma única vez (cerca de 3 GB no total): `llama3.2:3b`, que traduz e responde, e `bge-m3`, que encontra os trechos do documento.
+
+Pedem `sudo` só os pacotes do sistema e o Ollama; o app vai para a sua pasta pessoal (`~/.local/bin/paragrafo`, atalho e ícone em `~/.local/share`). Depois disso o Parágrafo aparece no menu de aplicativos e no "Abrir com" de arquivos PDF.
+
+Só o app, sem o Ollama (abrir, ler e exportar funcionam; traduzir e perguntar, não):
 
 ```sh
-./scripts/install.sh --ollama
+./scripts/install.sh --sem-ollama
 ```
 
-Só a instalação dos pacotes do sistema pede `sudo`; o app vai para a sua pasta pessoal (`~/.local/bin/paragrafo`, atalho e ícone em `~/.local/share`). Depois disso o Parágrafo aparece no menu de aplicativos e no "Abrir com" de arquivos PDF.
+Se o Ollama ou o modelo faltarem, o app mostra o que fazer logo abaixo do botão Traduzir, e oferece o download do modelo quando o Ollama já está instalado.
 
 Funciona em distribuições com `apt`, `dnf`, `pacman` ou `zypper` que tragam GTK 4.12+ e libadwaita 1.5+ (Ubuntu 24.04, Fedora 40, Debian 13 ou mais novos). Testado no Ubuntu 24.04; os nomes de pacote das outras distribuições não foram testados.
 
-A tradução e o assistente usam o [Ollama](https://ollama.com/download). Sem ele, abrir, ler e exportar o PDF funcionam normalmente; o app inicia o `ollama serve` quando precisa e oferece o download se algum modelo faltar. Opcional, para traduções melhores (modelo feito para traduzir; é usado sozinho quando está instalado):
+Opcional, para traduções melhores (modelo feito para traduzir; é usado sozinho quando está instalado):
 
 ```sh
 ollama pull translategemma:4b
@@ -67,7 +71,7 @@ ollama pull translategemma:4b
 
 O modo PDF original mostra uma página por vez, e a leitura lado a lado não muda para colunas empilhadas em janelas estreitas.
 
-Como a tradução é feita por um modelo de linguagem, ela é mais lenta que a do macOS e depende do modelo escolhido. Compare termos, números e referências com o original.
+Como a tradução é feita por um modelo de linguagem, ela é mais lenta que a do macOS e depende do modelo e do computador: com placa de vídeo, cerca de um segundo por parágrafo; só com o processador, de 10 a 30 segundos. A barra lateral mostra o tempo restante estimado. Compare termos, números e referências com o original.
 
 ## Privacidade
 

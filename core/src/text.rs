@@ -22,3 +22,8 @@ pub fn sha256_hex(data: &[u8]) -> String {
 pub fn now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
+
+/// "1 página", "3 páginas".
+pub fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}

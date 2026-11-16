@@ -152,7 +152,9 @@ fn assistente_ao_vivo() {
     let stopped = AtomicBool::new(true);
     assert_eq!(assistant::answer(&client, &index, CHAT, &question, &stopped, &mut |_| {}), Err(OllamaError::Cancelled), "parar interrompe a resposta");
 
-    let translated = translate::translate(&client, CHAT, "en", "pt", "The warranty lasts two years.", &go).unwrap();
+    let translation = translate::translate(&client, CHAT, "en", "pt", "The warranty lasts two years.", &go).unwrap();
+    assert!(!translation.kept_original, "o modelo respondeu com uma tradução");
+    let translated = translation.text;
     println!("INFO: tradução: {translated}");
     assert!(translated.to_lowercase().contains("garantia") && translated.to_lowercase().contains("anos"), "tradução local para o português");
     std::fs::remove_dir_all(root).unwrap();

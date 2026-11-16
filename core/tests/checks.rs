@@ -180,4 +180,10 @@ fn traducao_local() {
     assert_eq!(translate::clean("  \"Olá, mundo.\"\n", "Hello, world."), "Olá, mundo.", "aspas acrescentadas pelo modelo são removidas");
     assert_eq!(translate::clean("“Olá”", "“Hello”"), "“Olá”", "aspas do original são mantidas");
     assert_eq!(translate::clean("```\nOlá\n```", "Hello"), "Olá", "cerca de código é removida");
+    assert_eq!(translate::clean("<think>\nThe user wants Portuguese.\n</think>\n\nOlá, mundo.", "Hello, world."), "Olá, mundo.", "raciocínio de modelos que pensam é removido");
+    assert_eq!(translate::clean("<think>sem fim", "Hello"), "", "raciocínio sem fechamento não vira tradução");
+    assert_eq!(translate::clean("Here is the translation:\n\nA garantia dura dois anos.", "The warranty lasts two years."), "A garantia dura dois anos.", "linha de apresentação do modelo é removida");
+    assert_eq!(translate::clean("Tradução: A garantia dura dois anos.", "x"), "Tradução: A garantia dura dois anos.", "rótulo na mesma linha não é confundido com apresentação");
+    assert_eq!(translate::clean("Segue:\n", "x"), "Segue:", "apresentação sem resposta depois não apaga o texto");
+    assert!(paragrafo_core::text::plural(1, "página", "páginas") == "1 página" && paragrafo_core::text::plural(0, "página", "páginas") == "0 páginas", "plural");
 }

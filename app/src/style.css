@@ -12,8 +12,8 @@
 .paragraph:hover, .paragraph:focus-within { background-color: alpha(currentColor, 0.04); }
 .paragraph.highlighted { background-color: alpha(@accent_bg_color, 0.18); }
 .paragraph .number { font-size: 0.8em; font-feature-settings: "tnum"; }
-.paragraph .actions { opacity: 0; transition: opacity 150ms; }
-.paragraph:hover .actions, .paragraph:focus-within .actions { opacity: 1; }
+.paragraph .actions { opacity: 0.35; transition: opacity 150ms; }
+.paragraph:hover .actions, .paragraph:focus-within .actions, .paragraph .actions:checked { opacity: 1; }
 .original { opacity: 0.74; }
 .pending { opacity: 0.6; }
 
@@ -32,3 +32,7 @@
 .composer:focus-within { outline: 1.5px solid alpha(@accent_color, 0.7); }
 .composer entry { background: none; outline: none; box-shadow: none; }
 .chat-title { font-family: serif; font-size: 20px; font-weight: 500; }
+
+.issue { padding: 12px; }
+.issue button { margin-top: 2px; }
+.command { padding: 6px 8px; border-radius: 6px; background-color: alpha(currentColor, 0.08); }
